@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+.venv/
+node_modules/
+dist/
+build/
+*.log
+*.sqlite3
+*.egg-info/
+backend/data/
+backend/data/workspaces/

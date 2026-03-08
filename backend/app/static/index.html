@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multy-Bt</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="panel left-panel">
+      <div class="panel-head brand-head">
+        <div>
+          <p class="eyebrow">Shared Workspace</p>
+          <h1>Multy-Bt</h1>
+        </div>
+        <div class="inline-actions">
+          <button id="workflowHelpBtn" class="ghost-btn">Workflow</button>
+          <button id="refreshAllBtn" class="ghost-btn">Refresh</button>
+        </div>
+      </div>
+
+      <section class="card form-card">
+        <div class="section-head">
+          <h2>Start Something New</h2>
+          <span class="tag">Step 1</span>
+        </div>
+        <p class="microcopy">Describe the work in plain language. The system will keep people and helpers in the same loop.</p>
+        <form id="taskForm" class="stack">
+          <input id="taskTitle" name="title" type="text" placeholder="What needs to be done?" required>
+          <textarea id="taskSummary" name="summary" rows="4" placeholder="Add context, boundaries, and what a good result looks like"></textarea>
+          <input id="taskRepoPath" name="repo_path" type="text" placeholder="Project folder, if this work touches code">
+          <div class="inline-fields">
+            <input id="taskCreatedBy" name="created_by" type="text" placeholder="Created by" value="cloudwl" required>
+            <select id="taskPriority" name="priority">
+              <option value="normal">Normal pace</option>
+              <option value="high">Urgent</option>
+              <option value="low">Can wait</option>
+            </select>
+          </div>
+          <button type="submit" class="primary-btn">Create Task</button>
+        </form>
+      </section>
+
+      <section class="card list-card">
+        <div class="section-head">
+          <h2>Work Queue</h2>
+          <div class="inline-actions">
+            <span id="taskCount" class="tag muted">0</span>
+            <button id="deleteTaskBtn" class="ghost-btn" disabled>Remove Task</button>
+          </div>
+        </div>
+        <div id="taskList" class="task-list"></div>
+      </section>
+    </aside>
+
+    <main class="main-panel">
+      <section class="hero-strip">
+        <div>
+          <p class="eyebrow">Current Focus</p>
+          <h2 id="activeTaskTitle">Select a task</h2>
+          <p id="activeTaskMeta" class="muted">Choose a task to see context, conversation, and recent activity.</p>
+          <div id="taskGuideChips" class="guide-chips">
+            <span class="guide-chip">1. Pick a task</span>
+            <span class="guide-chip">2. Prepare a safe copy</span>
+            <span class="guide-chip">3. Tell a helper what to do</span>
+          </div>
+        </div>
+        <div class="hero-actions">
+          <button id="createWorkspaceBtn" class="primary-btn" disabled>Prepare Safe Copy</button>
+          <button id="launchCodexBtn" class="ghost-btn" disabled>Ask Codex</button>
+          <button id="launchClaudeBtn" class="ghost-btn" disabled>Ask Claude</button>
+        </div>
+      </section>
+
+      <section class="grid-two">
+        <article class="card detail-card">
+          <div class="section-head">
+            <h2>What Needs To Happen</h2>
+            <span id="taskStatusBadge" class="tag muted">No task</span>
+          </div>
+          <div id="taskSummaryView" class="detail-copy">No task selected.</div>
+          <div class="status-flow-block">
+            <div class="section-head compact-head">
+              <h2>Task Stage</h2>
+              <span class="microcopy">Keep the work moving without opening a separate admin flow.</span>
+            </div>
+            <div id="taskStatusFlow" class="status-flow">
+              <button class="ghost-btn status-step" type="button" data-status="todo">Ready</button>
+              <button class="ghost-btn status-step" type="button" data-status="in_progress">In Progress</button>
+              <button class="ghost-btn status-step" type="button" data-status="review">Needs Review</button>
+              <button class="ghost-btn status-step" type="button" data-status="done">Done</button>
+            </div>
+          </div>
+          <div class="memory-block">
+            <div class="section-head compact-head">
+              <h2>Working Memory</h2>
+              <button id="refreshSummaryBtn" class="ghost-btn" disabled>Refresh Memory</button>
+            </div>
+            <p class="microcopy">Saved context from earlier turns. This stays available when helpers start a new run.</p>
+            <div class="inline-meta">
+              <span id="taskContextUpdatedView" class="tag muted">No saved memory</span>
+              <span id="taskContextCountView" class="tag muted">0 source messages</span>
+            </div>
+            <div id="taskContextSummaryView" class="detail-copy memory-scroll muted">No saved summary yet.</div>
+          </div>
+          <div class="meta-grid">
+            <div>
+              <p class="meta-label">Repo</p>
+              <p id="taskRepoPathView" class="meta-value">-</p>
+            </div>
+            <div>
+              <p class="meta-label">Assigned</p>
+              <p id="taskAssignedView" class="meta-value">-</p>
+            </div>
+            <div>
+              <p class="meta-label">Branch</p>
+              <p id="taskBranchView" class="meta-value">-</p>
+            </div>
+            <div>
+              <p class="meta-label">Priority</p>
+              <p id="taskPriorityView" class="meta-value">-</p>
+            </div>
+          </div>
+        </article>
+
+        <article class="card workspace-card">
+          <div class="section-head">
+            <h2>Safe Working Area</h2>
+            <span id="workspaceKindBadge" class="tag muted">Detached</span>
+          </div>
+          <p id="workspaceHint" class="microcopy">If this task points to a code project, prepare a safe copy before asking an agent to work.</p>
+          <div class="meta-grid single-column">
+            <div>
+              <p class="meta-label">Safe Copy Path</p>
+              <p id="workspacePathView" class="meta-value codeish">-</p>
+            </div>
+            <div>
+              <p class="meta-label">Original Project</p>
+              <p id="workspaceRepoView" class="meta-value codeish">-</p>
+            </div>
+            <div>
+              <p class="meta-label">Git Worktree</p>
+              <p id="workspaceWorktreeView" class="meta-value codeish">-</p>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="grid-two bottom-grid">
+        <article class="card message-card">
+          <div class="section-head">
+            <h2>Conversation</h2>
+            <span id="messageCount" class="tag muted">0</span>
+          </div>
+          <div id="messageList" class="timeline-list"></div>
+          <div class="subcomposer">
+            <p class="microcopy">Add a note, decision, or instruction to the current task.</p>
+            <div class="inline-fields">
+              <select id="messageType">
+                <option value="instruction">Instruction</option>
+                <option value="question">Question</option>
+                <option value="decision">Decision</option>
+              </select>
+              <select id="messageTarget">
+                <option value="broadcast">Everyone following this task</option>
+                <option value="codex_local">Codex only</option>
+                <option value="claude_local">Claude only</option>
+              </select>
+            </div>
+            <textarea id="messageInput" rows="4" placeholder="Example: Please review the last change before we merge it."></textarea>
+            <div class="inline-actions">
+              <button id="sendMessageBtn" class="ghost-btn" disabled>Send Message</button>
+              <button id="sendAndAskBtn" class="primary-btn" disabled>Send And Ask Helper</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="card runs-card">
+          <div class="section-head">
+            <h2>Activity</h2>
+            <span id="runCount" class="tag muted">0</span>
+          </div>
+          <div id="runList" class="timeline-list"></div>
+          <div class="run-detail">
+            <div class="section-head">
+              <h2>Selected Activity</h2>
+              <div class="inline-actions">
+                <select id="runEventFilter">
+                  <option value="all">All output</option>
+                  <option value="errors">Errors only</option>
+                </select>
+                <span id="runDetailBadge" class="tag muted">No activity</span>
+                <button id="stopRunBtn" class="ghost-btn" disabled>Stop</button>
+              </div>
+            </div>
+            <p id="runDetailMeta" class="microcopy">Choose an activity item to inspect its output.</p>
+            <div id="runEventList" class="event-feed compact-feed"></div>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <aside class="panel right-panel">
+      <section class="card agent-card">
+        <div class="section-head">
+          <h2>Available Helpers</h2>
+          <span id="agentCount" class="tag muted">0</span>
+        </div>
+        <div id="agentList" class="agent-list"></div>
+      </section>
+
+      <section class="card composer-card">
+        <div class="section-head">
+          <h2>Start A New Helper Turn</h2>
+          <span class="tag">Step 3</span>
+        </div>
+        <p id="composerHint" class="microcopy">Choose a helper, write the next turn, then start a new run for this task.</p>
+        <p class="microcopy">These are helper roles, not saved tasks:</p>
+        <select id="agentPicker">
+          <option value="codex">Codex: implement and run changes</option>
+          <option value="claude">Claude: review, plan, and reason</option>
+        </select>
+        <textarea id="launchPrompt" rows="8" placeholder="Example: Read this project, identify the top risk, then patch it and report what changed."></textarea>
+        <button id="sendTaskBtn" class="primary-btn" disabled>Send Task</button>
+        <p class="microcopy">If you leave the message blank, the task description will be used.</p>
+      </section>
+
+      <section class="card event-card">
+        <div class="section-head">
+          <h2>Recent Updates</h2>
+          <span id="socketBadge" class="tag muted">Offline</span>
+        </div>
+        <div id="eventFeed" class="event-feed"></div>
+      </section>
+    </aside>
+  </div>
+
+  <template id="taskItemTemplate">
+    <button class="task-item" type="button">
+      <div class="task-row">
+        <span class="task-title"></span>
+        <span class="task-priority tag muted"></span>
+      </div>
+      <div class="task-row muted small">
+        <span class="task-status"></span>
+        <span class="task-agent"></span>
+      </div>
+      <p class="task-summary-preview small muted"></p>
+    </button>
+  </template>
+
+  <template id="handoffTemplate">
+    <div class="handoff-bar">
+      <select class="handoff-target">
+        <option value="codex_local">Transfer to Codex</option>
+        <option value="claude_local">Transfer to Claude</option>
+      </select>
+      <select class="handoff-mode">
+        <option value="full">Transfer full reply</option>
+        <option value="summary">Transfer key conclusion only</option>
+      </select>
+      <textarea class="handoff-note" rows="3" placeholder="Optional note for the next helper"></textarea>
+      <button class="ghost-btn handoff-btn" type="button">Transfer</button>
+    </div>
+  </template>
+
+  <dialog id="workflowDialog" class="help-dialog">
+    <div class="help-card">
+      <div class="section-head">
+        <h2>How To Use Multy-Bt</h2>
+        <button id="closeWorkflowHelpBtn" class="ghost-btn" type="button">Close</button>
+      </div>
+      <div class="help-copy">
+        <p><strong>1. Start a task</strong><br>Create a task on the left. If it touches code, add the project folder.</p>
+        <p><strong>2. Prepare a safe copy</strong><br>Use <code>Prepare Safe Copy</code> before asking a helper to modify a codebase.</p>
+        <p><strong>3. Start the first helper turn</strong><br>Use <code>Send Task</code> on the right to launch a full turn for Codex or Claude.</p>
+        <p><strong>4. Talk inside the task</strong><br>Use <code>Conversation</code> for notes, questions, decisions, and follow-up instructions.</p>
+        <p><strong>5. Know the difference</strong><br><code>Send Message</code> only records a message. <code>Send And Ask Helper</code> records the message and immediately starts a helper run.</p>
+        <p><strong>6. Transfer work between helpers</strong><br>Use <code>Transfer</code> under an agent reply when you want the next helper to continue from that result.</p>
+        <p><strong>7. Track progress</strong><br>Use <code>Task Stage</code> to move work from <code>Ready</code> to <code>In Progress</code>, <code>Needs Review</code>, and <code>Done</code>.</p>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
