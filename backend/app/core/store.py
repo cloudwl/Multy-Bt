@@ -12,6 +12,7 @@ from typing import TypeVar
 from app.models import (
     Agent,
     AgentRegister,
+    AgentSession,
     AgentStatus,
     AgentStatusUpdate,
     Approval,
@@ -115,6 +116,17 @@ class SQLiteStore:
                     created_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    task_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    cwd TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (task_id, agent_id),
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
@@ -179,6 +191,7 @@ class SQLiteStore:
 
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_agent_sessions_task ON agent_sessions(task_id, agent_id);
                 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id, started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, seq);
                 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status, created_at DESC);
@@ -508,6 +521,49 @@ class SQLiteStore:
         with self._lock:
             rows = self._conn.execute("SELECT * FROM agents ORDER BY id ASC").fetchall()
         return [Agent(**dict(row)) for row in rows]
+
+    def get_agent_session(self, task_id: str, agent_id: str) -> AgentSession | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_sessions WHERE task_id = ? AND agent_id = ?",
+                (task_id, agent_id),
+            ).fetchone()
+        return self._model_from_row(AgentSession, row)
+
+    def upsert_agent_session(
+        self, task_id: str, agent_id: str, session_id: str, cwd: str | None = None
+    ) -> AgentSession:
+        existing = self.get_agent_session(task_id, agent_id)
+        timestamp = now_ms()
+        session = AgentSession(
+            task_id=task_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            cwd=cwd if cwd is not None else (existing.cwd if existing else None),
+            created_at=existing.created_at if existing else timestamp,
+            updated_at=timestamp,
+        )
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO agent_sessions (
+                    task_id, agent_id, session_id, cwd, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id, agent_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    cwd = excluded.cwd,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session.task_id,
+                    session.agent_id,
+                    session.session_id,
+                    session.cwd,
+                    session.created_at,
+                    session.updated_at,
+                ),
+            )
+        return session
 
     def _refresh_task_context_summary_locked(
         self, task_id: str

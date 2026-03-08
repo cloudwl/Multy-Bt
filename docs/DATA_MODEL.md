@@ -112,6 +112,25 @@ Allowed `status`:
 - `offline`
 - `error`
 
+### agent_sessions
+
+Purpose:
+
+- persisted conversation/session identity per task and agent
+
+Fields:
+
+- `task_id`: text not null
+- `agent_id`: text not null
+- `session_id`: text not null
+- `cwd`: text null
+- `created_at`: integer not null
+- `updated_at`: integer not null
+
+Primary key:
+
+- `(task_id, agent_id)`
+
 ### runs
 
 Purpose:

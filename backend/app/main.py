@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import sys
 from pathlib import Path
+
+# Windows subprocesses require the proactor loop policy.
+if sys.platform == "win32" and hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware

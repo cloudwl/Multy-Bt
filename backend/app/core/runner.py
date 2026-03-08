@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
+import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -34,6 +37,9 @@ class AgentRunManager:
         self.events = events
         self.workspace_manager = workspace_manager
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._active_task_agents: set[tuple[str, str]] = set()
+        # Default to repository root when task/repo/workspace cwd is missing.
+        self._default_cwd = Path(__file__).resolve().parents[3]
 
     async def ensure_codex_agent(self) -> None:
         agent = self.store.register_agent(
@@ -65,25 +71,45 @@ class AgentRunManager:
             raise ValueError("Task not found")
 
         await self.ensure_codex_agent()
-        prompt = self._compose_task_prompt(task, "codex_local", payload.prompt)
-        payload = payload.model_copy(update={"prompt": prompt})
-        cwd = await self._resolve_cwd(task.id, payload.cwd, task.repo_path)
-        command_line = self._command_line_preview(payload, cwd)
-        run = self.store.create_run(
-            RunCreate(
-                task_id=payload.task_id,
-                agent_id="codex_local",
-                command_line=command_line,
-                cwd=cwd,
+        self._claim_agent_turn(task.id, "codex_local")
+        try:
+            existing_session = self.store.get_agent_session(task.id, "codex_local")
+            prompt = self._compose_task_prompt(
+                task,
+                "codex_local",
+                payload.prompt,
+                resumed=existing_session is not None,
             )
-        )
-        await self.events.publish("run.created", run.model_dump())
-        self.store.update_task(
-            payload.task_id,
-            TaskUpdate(status=TaskStatus.IN_PROGRESS, assigned_agent_id="codex_local"),
-        )
-        asyncio.create_task(self._execute_codex(run.id, payload, cwd))
-        return run
+            payload = payload.model_copy(
+                update={
+                    "prompt": prompt,
+                    "session_id": existing_session.session_id if existing_session else None,
+                }
+            )
+            cwd = await self._resolve_cwd(task.id, payload.cwd, task.repo_path)
+            if existing_session is not None:
+                self.store.upsert_agent_session(
+                    task.id, "codex_local", existing_session.session_id, cwd
+                )
+            command_line = self._command_line_preview(payload, cwd)
+            run = self.store.create_run(
+                RunCreate(
+                    task_id=payload.task_id,
+                    agent_id="codex_local",
+                    command_line=command_line,
+                    cwd=cwd,
+                )
+            )
+            await self.events.publish("run.created", run.model_dump())
+            self.store.update_task(
+                payload.task_id,
+                TaskUpdate(status=TaskStatus.IN_PROGRESS, assigned_agent_id="codex_local"),
+            )
+            asyncio.create_task(self._execute_codex(run.id, payload, cwd))
+            return run
+        except Exception:
+            self._release_agent_turn(task.id, "codex_local")
+            raise
 
     async def launch_claude(self, payload: ClaudeLaunchRequest) -> Run:
         task = self.store.get_task(payload.task_id)
@@ -91,27 +117,49 @@ class AgentRunManager:
             raise ValueError("Task not found")
 
         await self.ensure_claude_agent()
-        prompt = self._compose_task_prompt(task, "claude_local", payload.prompt)
-        payload = payload.model_copy(update={"prompt": prompt})
-        cwd = await self._resolve_cwd(task.id, payload.cwd, task.repo_path)
-        command_line = self._command_line_preview_claude(payload)
-        run = self.store.create_run(
-            RunCreate(
-                task_id=payload.task_id,
-                agent_id="claude_local",
-                command_line=command_line,
-                cwd=cwd,
+        self._claim_agent_turn(task.id, "claude_local")
+        try:
+            existing_session = self.store.get_agent_session(task.id, "claude_local")
+            prompt = self._compose_task_prompt(
+                task,
+                "claude_local",
+                payload.prompt,
+                resumed=existing_session is not None,
             )
-        )
-        await self.events.publish("run.created", run.model_dump())
-        self.store.update_task(
-            payload.task_id,
-            TaskUpdate(status=TaskStatus.IN_PROGRESS, assigned_agent_id="claude_local"),
-        )
-        asyncio.create_task(self._execute_claude(run.id, payload, cwd))
-        return run
+            payload = payload.model_copy(
+                update={
+                    "prompt": prompt,
+                    "session_id": existing_session.session_id if existing_session else None,
+                    "no_session_persistence": False,
+                }
+            )
+            cwd = await self._resolve_cwd(task.id, payload.cwd, task.repo_path)
+            if existing_session is not None:
+                self.store.upsert_agent_session(
+                    task.id, "claude_local", existing_session.session_id, cwd
+                )
+            command_line = self._command_line_preview_claude(payload)
+            run = self.store.create_run(
+                RunCreate(
+                    task_id=payload.task_id,
+                    agent_id="claude_local",
+                    command_line=command_line,
+                    cwd=cwd,
+                )
+            )
+            await self.events.publish("run.created", run.model_dump())
+            self.store.update_task(
+                payload.task_id,
+                TaskUpdate(status=TaskStatus.IN_PROGRESS, assigned_agent_id="claude_local"),
+            )
+            asyncio.create_task(self._execute_claude(run.id, payload, cwd))
+            return run
+        except Exception:
+            self._release_agent_turn(task.id, "claude_local")
+            raise
 
     async def stop_run(self, run_id: str) -> Run | None:
+        run = self.store.get_run(run_id)
         process = self._processes.get(run_id)
         if process is not None and process.returncode is None:
             process.terminate()
@@ -129,6 +177,8 @@ class AgentRunManager:
                 RunEventType.STATUS,
                 {"status": RunStatus.STOPPED.value},
             )
+        if run is not None:
+            self._release_agent_turn(run.task_id, run.agent_id)
         return run
 
     async def _execute_codex(
@@ -147,12 +197,15 @@ class AgentRunManager:
                 created_at=now_ms(),
             ).model_dump(),
         )
-        process = await asyncio.create_subprocess_exec(
-            *self._build_codex_command(payload, cwd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-        )
+        try:
+            process = await self._spawn_process(
+                self._build_codex_command(payload, cwd),
+                cwd,
+                stdin_text=payload.prompt,
+            )
+        except Exception as exc:
+            await self._handle_launch_failure(run_id, "codex_local", payload.task_id, exc)
+            return
         self._processes[run_id] = process
         run = self.store.update_run_pid(run_id, process.pid)
         if run is not None:
@@ -167,6 +220,7 @@ class AgentRunManager:
         return_code = await process.wait()
         await asyncio.gather(stdout_task, stderr_task)
         self._processes.pop(run_id, None)
+        self._release_agent_turn(payload.task_id, "codex_local")
         self.store.update_agent_status("codex_local", AgentStatusUpdate(status=AgentStatus.IDLE))
 
         if return_code == 0:
@@ -204,12 +258,11 @@ class AgentRunManager:
                 created_at=now_ms(),
             ).model_dump(),
         )
-        process = await asyncio.create_subprocess_exec(
-            *self._build_claude_command(payload),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-        )
+        try:
+            process = await self._spawn_process(self._build_claude_command(payload), cwd)
+        except Exception as exc:
+            await self._handle_launch_failure(run_id, "claude_local", payload.task_id, exc)
+            return
         self._processes[run_id] = process
         run = self.store.update_run_pid(run_id, process.pid)
         if run is not None:
@@ -228,6 +281,7 @@ class AgentRunManager:
         return_code = await process.wait()
         await asyncio.gather(stdout_task, stderr_task)
         self._processes.pop(run_id, None)
+        self._release_agent_turn(payload.task_id, "claude_local")
         self.store.update_agent_status("claude_local", AgentStatusUpdate(status=AgentStatus.IDLE))
 
         if return_code == 0:
@@ -248,6 +302,73 @@ class AgentRunManager:
                 RunEventType.RESULT,
                 {"status": RunStatus.FAILED.value, "exit_code": return_code},
             )
+
+    async def _spawn_process(
+        self, command: Sequence[str], cwd: str, stdin_text: str | None = None
+    ) -> asyncio.subprocess.Process:
+        env = os.environ.copy()
+        # Remove parent Claude marker so nested runs can start cleanly.
+        env.pop("CLAUDECODE", None)
+        stdin_pipe = asyncio.subprocess.PIPE if stdin_text is not None else None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdin=stdin_pipe,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+            )
+        except OSError as exc:
+            # On Windows, CLI tools often install as .cmd/.ps1 shims.
+            if sys.platform != "win32" or getattr(exc, "winerror", None) not in {2, 193}:
+                raise
+            cmd_str = subprocess.list2cmdline([str(part) for part in command])
+            process = await asyncio.create_subprocess_shell(
+                cmd_str,
+                stdin=stdin_pipe,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+            )
+        if stdin_text is not None and process.stdin is not None:
+            try:
+                process.stdin.write(stdin_text.encode("utf-8"))
+                process.stdin.write(b"\n")
+                await process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            process.stdin.close()
+        return process
+
+    async def _handle_launch_failure(
+        self, run_id: str, agent_id: str, task_id: str, exc: Exception
+    ) -> None:
+        error_text = f"Failed to launch agent process: {exc}"
+        self._release_agent_turn(task_id, agent_id)
+        self.store.update_agent_status(agent_id, AgentStatusUpdate(status=AgentStatus.IDLE))
+        failed = self.store.update_run_status(run_id, RunStatus.FAILED, exit_code=1)
+        if failed is not None:
+            await self.events.publish("run.updated", failed.model_dump())
+        await self._emit_run_event(run_id, RunEventType.STDERR, {"text": error_text})
+        await self._emit_run_event(
+            run_id,
+            RunEventType.RESULT,
+            {"status": RunStatus.FAILED.value, "exit_code": 1, "error": str(exc)},
+        )
+        task_message = TaskMessage(
+            id=make_id("msg"),
+            task_id=task_id,
+            sender_type=SenderType.SYSTEM,
+            sender_id="multy-bt",
+            target_type=TargetType.BROADCAST,
+            message_type=MessageType.ERROR,
+            content=error_text,
+            created_at=now_ms(),
+        )
+        self.store.add_message(task_id, task_message)
+        await self.events.publish("task.message_created", task_message.model_dump())
 
     async def _pump_stream(
         self,
@@ -277,7 +398,33 @@ class AgentRunManager:
         )
         if event is not None:
             await self.events.publish("run.event", event.model_dump())
+            await self._maybe_capture_agent_session(event)
             await self._maybe_publish_agent_message(event)
+
+    async def _maybe_capture_agent_session(self, event) -> None:
+        if event.event_type != RunEventType.STDOUT:
+            return
+        run = self.store.get_run(event.run_id)
+        if run is None:
+            return
+        json_payload = event.payload.get("json")
+        if not isinstance(json_payload, dict):
+            return
+        if run.agent_id == "codex_local":
+            if json_payload.get("type") != "thread.started":
+                return
+            thread_id = json_payload.get("thread_id")
+            if not isinstance(thread_id, str) or not thread_id.strip():
+                return
+            self.store.upsert_agent_session(run.task_id, run.agent_id, thread_id.strip(), run.cwd)
+            return
+        if run.agent_id == "claude_local":
+            if json_payload.get("type") != "system" or json_payload.get("subtype") != "init":
+                return
+            session_id = json_payload.get("session_id")
+            if not isinstance(session_id, str) or not session_id.strip():
+                return
+            self.store.upsert_agent_session(run.task_id, run.agent_id, session_id.strip(), run.cwd)
 
     async def _maybe_publish_agent_message(self, event) -> None:
         if event.event_type != RunEventType.STDOUT:
@@ -304,6 +451,12 @@ class AgentRunManager:
                                 text_parts.append(text.strip())
                     if text_parts:
                         message_text = "\n".join(text_parts)
+        elif json_payload.get("type") == "item.completed":
+            item = json_payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    message_text = text.strip()
         elif json_payload.get("type") == "result":
             if run.agent_id == "claude_local":
                 return
@@ -327,7 +480,34 @@ class AgentRunManager:
         self.store.add_message(run.task_id, task_message)
         await self.events.publish("task.message_created", task_message.model_dump())
 
-    def _compose_task_prompt(self, task, agent_id: str, prompt: str) -> str:
+    def _claim_agent_turn(self, task_id: str, agent_id: str) -> None:
+        key = (task_id, agent_id)
+        if key in self._active_task_agents:
+            raise ValueError(f"{agent_id} already has an active turn for this task")
+        self._active_task_agents.add(key)
+
+    def _release_agent_turn(self, task_id: str, agent_id: str) -> None:
+        self._active_task_agents.discard((task_id, agent_id))
+
+    def _compose_task_prompt(
+        self, task, agent_id: str, prompt: str, *, resumed: bool = False
+    ) -> str:
+        if resumed:
+            return "\n".join(
+                [
+                    "You are resuming the same Multy-Bt conversation session.",
+                    "Only respond to the explicit request in this new turn.",
+                    "Do not continue prior work on your own.",
+                    "Do not run extra checks, scans, edits, or follow-up tasks unless the new turn explicitly asks for them.",
+                    "If the new turn is ambiguous, ask a clarifying question instead of choosing additional work yourself.",
+                    f"Task title: {task.title}",
+                    f"Repo path: {task.repo_path or 'No repo path provided.'}",
+                    "",
+                    "New turn:",
+                    prompt,
+                ]
+            )
+
         messages = self.store.list_messages(task.id)
         stored_summary = self.store.get_task_context_summary(task.id)
         if stored_summary is None and len(messages) > SUMMARY_RAW_MESSAGE_LIMIT:
@@ -342,7 +522,10 @@ class AgentRunManager:
         recent_messages = relevant_messages[-SUMMARY_RAW_MESSAGE_LIMIT:]
 
         context_lines = [
-            "You are continuing work inside an existing Multy-Bt task.",
+            "You are working inside an existing Multy-Bt task.",
+            "Only handle the explicit current turn.",
+            "Do not proactively continue adjacent work unless the user explicitly asks.",
+            "If the current turn is ambiguous, ask a clarifying question before acting.",
             "",
             "Task context:",
             f"- Title: {task.title}",
@@ -385,7 +568,7 @@ class AgentRunManager:
         self, task_id: str, explicit_cwd: str | None, repo_path: str | None
     ) -> str:
         if explicit_cwd:
-            return explicit_cwd
+            return str(Path(explicit_cwd).resolve())
 
         workspace = self.store.get_workspace_by_task(task_id)
         if workspace is not None and Path(workspace.workspace_path).exists():
@@ -395,11 +578,25 @@ class AgentRunManager:
             workspace = await self.workspace_manager.create_for_task(task_id)
             return workspace.workspace_path
 
-        return repo_path or "."
+        if repo_path:
+            return str(Path(repo_path).resolve())
+        return str(self._default_cwd)
 
     def _build_codex_command(
         self, payload: CodexLaunchRequest, cwd: str
     ) -> Sequence[str]:
+        if payload.session_id:
+            command = ["codex", "exec", "resume", "--json"]
+            if payload.skip_git_repo_check:
+                command.append("--skip-git-repo-check")
+            if payload.full_auto:
+                command.append("--full-auto")
+            if payload.model:
+                command.extend(["--model", payload.model])
+            command.append(payload.session_id)
+            command.append("-")
+            return command
+
         command = ["codex", "exec", "--json", "-C", cwd]
         if payload.skip_git_repo_check:
             command.append("--skip-git-repo-check")
@@ -411,10 +608,22 @@ class AgentRunManager:
             command.extend(["--model", payload.model])
         if payload.profile:
             command.extend(["--profile", payload.profile])
-        command.append(payload.prompt)
+        command.append("-")
         return command
 
     def _command_line_preview(self, payload: CodexLaunchRequest, cwd: str) -> str:
+        if payload.session_id:
+            preview = ["codex exec resume --json"]
+            if payload.skip_git_repo_check:
+                preview.append("--skip-git-repo-check")
+            if payload.full_auto:
+                preview.append("--full-auto")
+            if payload.model:
+                preview.append(f"--model {payload.model}")
+            preview.append(payload.session_id)
+            preview.append("<prompt>")
+            return " ".join(preview)
+
         preview = ["codex exec --json", f"-C {cwd}"]
         if payload.skip_git_repo_check:
             preview.append("--skip-git-repo-check")
@@ -434,6 +643,8 @@ class AgentRunManager:
             command.append("--print")
         if payload.no_session_persistence:
             command.append("--no-session-persistence")
+        if payload.session_id:
+            command.extend(["--resume", payload.session_id])
         command.extend(["--output-format", payload.output_format])
         if payload.output_format == "stream-json":
             command.append("--verbose")
@@ -449,6 +660,8 @@ class AgentRunManager:
             preview.append("--print")
         if payload.no_session_persistence:
             preview.append("--no-session-persistence")
+        if payload.session_id:
+            preview.append(f"--resume {payload.session_id}")
         preview.append(f"--output-format {payload.output_format}")
         if payload.output_format == "stream-json":
             preview.append("--verbose")

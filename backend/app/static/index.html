@@ -155,7 +155,7 @@
           </div>
           <div id="messageList" class="timeline-list"></div>
           <div class="subcomposer">
-            <p class="microcopy">Add a note, decision, or instruction to the current task.</p>
+            <p class="microcopy">Send the next turn to Claude, Codex, or both.</p>
             <div class="inline-fields">
               <select id="messageType">
                 <option value="instruction">Instruction</option>
@@ -163,15 +163,14 @@
                 <option value="decision">Decision</option>
               </select>
               <select id="messageTarget">
-                <option value="broadcast">Everyone following this task</option>
+                <option value="broadcast">Claude and Codex</option>
                 <option value="codex_local">Codex only</option>
                 <option value="claude_local">Claude only</option>
               </select>
             </div>
             <textarea id="messageInput" rows="4" placeholder="Example: Please review the last change before we merge it."></textarea>
             <div class="inline-actions">
-              <button id="sendMessageBtn" class="ghost-btn" disabled>Send Message</button>
-              <button id="sendAndAskBtn" class="primary-btn" disabled>Send And Ask Helper</button>
+              <button id="sendMessageBtn" class="primary-btn" disabled>Send</button>
             </div>
           </div>
         </article>
@@ -215,7 +214,7 @@
           <h2>Start A New Helper Turn</h2>
           <span class="tag">Step 3</span>
         </div>
-        <p id="composerHint" class="microcopy">Choose a helper, write the next turn, then start a new run for this task.</p>
+        <p id="composerHint" class="microcopy">Choose a task, then send the next turn to one helper or both.</p>
         <p class="microcopy">These are helper roles, not saved tasks:</p>
         <select id="agentPicker">
           <option value="codex">Codex: implement and run changes</option>

@@ -41,7 +41,6 @@ const els = {
   messageType: document.getElementById('messageType'),
   messageTarget: document.getElementById('messageTarget'),
   sendMessageBtn: document.getElementById('sendMessageBtn'),
-  sendAndAskBtn: document.getElementById('sendAndAskBtn'),
   runList: document.getElementById('runList'),
   runCount: document.getElementById('runCount'),
   runDetailBadge: document.getElementById('runDetailBadge'),
@@ -116,6 +115,21 @@ const FRIENDLY_RUN_EVENT = {
   heartbeat: 'Heartbeat',
 };
 
+function withRunGuardrails(basePrompt, launchCwd) {
+  const cwdLabel = launchCwd || '(server default working directory)';
+  const guardrails = [
+    'Execution context rules:',
+    `- Working directory is: ${cwdLabel}`,
+    '- Existing uncommitted changes may already exist. Treat them as baseline context and do not stop only because git status is dirty.',
+    '- Stay within this task scope. Do not scan unrelated user home folders unless explicitly requested.',
+    '- Respond only to the explicit request in the current turn.',
+    '- Do not continue prior work, run extra verification, or start adjacent tasks unless explicitly requested in the current turn.',
+    '- If the current turn is ambiguous, ask a clarifying question instead of deciding extra work yourself.',
+  ].join('\\n');
+  return `${guardrails}\n\nCurrent turn:\n${basePrompt}`;
+}
+
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -167,7 +181,7 @@ function statusDot(status) {
 function summarize(text, max = 96) {
   const value = (text || '').trim();
   if (!value) return 'No extra context yet.';
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+  return value.length > max ? `${value.slice(0, max - 3)}...` : value;
 }
 
 function summarizeForTransfer(text, max = 320) {
@@ -256,13 +270,11 @@ function updateActionState() {
   const task = getSelectedTask();
   const run = getSelectedRun();
   const enabled = Boolean(task);
-  const canAskFromMessage = enabled && els.messageTarget.value !== 'broadcast';
   els.createWorkspaceBtn.disabled = !enabled;
   els.launchCodexBtn.disabled = !enabled;
   els.launchClaudeBtn.disabled = !enabled;
   els.sendTaskBtn.disabled = !enabled;
   els.sendMessageBtn.disabled = !enabled;
-  els.sendAndAskBtn.disabled = !canAskFromMessage;
   els.stopRunBtn.disabled = !run || isTerminalRunStatus(run.status);
   els.refreshSummaryBtn.disabled = !enabled;
   els.deleteTaskBtn.disabled = !enabled;
@@ -271,15 +283,15 @@ function updateActionState() {
   }
 
   if (!task) {
-    els.composerHint.textContent = 'Choose a task first, then decide who should handle it.';
+    els.composerHint.textContent = 'Choose a task, then send the next turn to one helper or both.';
     return;
   }
 
   const workspace = getSelectedWorkspace();
   if (task.repo_path && !workspace) {
-    els.composerHint.textContent = 'This task points to a project folder. We will prepare a safe copy before handing it to an agent.';
+    els.composerHint.textContent = 'This task points to a project folder. We will prepare a safe copy before sending the next turn to the helpers.';
   } else {
-    els.composerHint.textContent = 'Write the next instruction in normal language. The selected helper will receive it in this task context.';
+    els.composerHint.textContent = 'Write the next turn in normal language. The selected helper, or both helpers, will receive it in this task context.';
   }
 }
 
@@ -289,7 +301,7 @@ function renderMessageTargetOptions() {
     .map((agent) => `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)}</option>`)
     .join('');
   els.messageTarget.innerHTML = `
-    <option value="broadcast">Everyone following this task</option>
+    <option value="broadcast">Claude and Codex</option>
     ${dynamicOptions}
   `;
   if ([...els.messageTarget.options].some((option) => option.value === current)) {
@@ -415,7 +427,7 @@ function renderMessages() {
           <strong>${escapeHtml(labelForMessageType(message.message_type))}</strong>
           <span class="muted small">${formatTime(message.created_at)}</span>
         </div>
-        <p class="muted small">${escapeHtml(message.sender_type)} · ${escapeHtml(message.sender_id)} · ${escapeHtml(labelForMessageTarget(message))}</p>
+        <p class="muted small">${escapeHtml(message.sender_type)} -> ${escapeHtml(message.sender_id)} -> ${escapeHtml(labelForMessageTarget(message))}</p>
         <p>${escapeHtml(message.content)}</p>
         ${message.sender_type === 'agent' ? `<div class="handoff-slot" data-message-id="${escapeHtml(message.id)}"></div>` : ''}
       </article>
@@ -535,7 +547,7 @@ function renderAgents() {
           <strong>${escapeHtml(agent.name)}</strong>
           <span>${statusDot(agent.status)}</span>
         </div>
-        <p class="muted small">${escapeHtml(agent.kind)} · ${escapeHtml(agent.transport)}</p>
+        <p class="muted small">${escapeHtml(agent.kind)} -> ${escapeHtml(agent.transport)}</p>
         <p class="codeish">${escapeHtml(agent.host)}</p>
       </article>
     `)
@@ -835,11 +847,18 @@ async function launchAgent(kind, promptOverride = null) {
   const task = getSelectedTask();
   if (!task) return;
   await ensureWorkspaceIfNeeded();
-  const prompt = promptOverride || els.launchPrompt.value.trim() || task.summary || `Work on task: ${task.title}`;
+  const workspace = getSelectedWorkspace();
+  const launchCwd = workspace?.workspace_path || task.repo_path || null;
+  const basePrompt = promptOverride || els.launchPrompt.value.trim() || task.summary || `Work on task: ${task.title}`;
+  const prompt = withRunGuardrails(basePrompt, launchCwd);
   const path = kind === 'codex' ? '/adapters/codex/launch' : '/adapters/claude/launch';
+  const launchBasePayload = { task_id: task.id, prompt };
+  if (launchCwd) {
+    launchBasePayload.cwd = launchCwd;
+  }
   const payload = kind === 'codex'
-    ? { task_id: task.id, prompt, sandbox: 'workspace-write', full_auto: true, skip_git_repo_check: true }
-    : { task_id: task.id, prompt, permission_mode: 'default', output_format: 'stream-json', print_mode: true, no_session_persistence: true };
+    ? { ...launchBasePayload, sandbox: 'workspace-write', full_auto: true, skip_git_repo_check: true }
+    : { ...launchBasePayload, permission_mode: 'default', output_format: 'stream-json', print_mode: true, no_session_persistence: true };
   await api(path, {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -852,10 +871,10 @@ async function launchAgent(kind, promptOverride = null) {
   renderAll();
 }
 
-async function sendTaskMessage() {
+async function postTaskMessage() {
   const task = getSelectedTask();
   const content = els.messageInput.value.trim();
-  if (!task || !content) return;
+  if (!task || !content) return null;
   const target = els.messageTarget.value;
   const isBroadcast = target === 'broadcast';
   const messageType = els.messageType.value;
@@ -874,7 +893,7 @@ async function sendTaskMessage() {
   await loadTaskSummary(task.id);
   els.messageInput.value = '';
   renderAll();
-  return message;
+  return { message, content, target };
 }
 
 function launchKindFromAgentId(agentId) {
@@ -883,17 +902,33 @@ function launchKindFromAgentId(agentId) {
   throw new Error(`Unsupported agent target: ${agentId}`);
 }
 
-async function sendMessageAndAskHelper() {
-  const target = els.messageTarget.value;
-  if (target === 'broadcast') {
-    throw new Error('Choose a specific helper first');
-  }
+async function sendConversationTurn() {
   const content = els.messageInput.value.trim();
   if (!content) {
     throw new Error('Write a message first');
   }
-  await sendTaskMessage();
-  await launchAgent(launchKindFromAgentId(target), content);
+
+  const posted = await postTaskMessage();
+  if (!posted) {
+    return;
+  }
+
+  if (posted.target === 'broadcast') {
+    const launches = await Promise.allSettled([
+      launchAgent('claude', posted.content),
+      launchAgent('codex', posted.content),
+    ]);
+    const failures = launches
+      .map((result, index) => ({ result, label: index === 0 ? 'Claude' : 'Codex' }))
+      .filter(({ result }) => result.status === 'rejected')
+      .map(({ result, label }) => label + ': ' + (result.reason?.message || result.reason));
+    if (failures.length) {
+      throw new Error('Message was saved, but some helpers did not start. ' + failures.join(' | '));
+    }
+    return;
+  }
+
+  await launchAgent(launchKindFromAgentId(posted.target), posted.content);
 }
 
 async function stopSelectedRun() {
@@ -993,17 +1028,9 @@ els.sendTaskBtn.addEventListener('click', async () => {
 
 els.sendMessageBtn.addEventListener('click', async () => {
   try {
-    await sendTaskMessage();
+    await sendConversationTurn();
   } catch (error) {
-    alert(`Send message failed: ${error.message}`);
-  }
-});
-
-els.sendAndAskBtn.addEventListener('click', async () => {
-  try {
-    await sendMessageAndAskHelper();
-  } catch (error) {
-    alert(`Send and ask failed: ${error.message}`);
+    alert(`Send failed: ${error.message}`);
   }
 });
 

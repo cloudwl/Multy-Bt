@@ -215,6 +215,15 @@ class AgentStatusUpdate(BaseModel):
     status: AgentStatus
 
 
+class AgentSession(BaseModel):
+    task_id: str
+    agent_id: str
+    session_id: str
+    cwd: str | None = None
+    created_at: int
+    updated_at: int
+
+
 class RunCreate(BaseModel):
     task_id: str
     agent_id: str
@@ -239,6 +248,7 @@ class CodexLaunchRequest(BaseModel):
     task_id: str
     prompt: str
     cwd: str | None = None
+    session_id: str | None = None
     model: str | None = None
     profile: str | None = None
     sandbox: SandboxMode = SandboxMode.WORKSPACE_WRITE
@@ -250,6 +260,7 @@ class ClaudeLaunchRequest(BaseModel):
     task_id: str
     prompt: str
     cwd: str | None = None
+    session_id: str | None = None
     model: str | None = None
     permission_mode: ClaudePermissionMode = ClaudePermissionMode.DEFAULT
     output_format: str = "stream-json"
